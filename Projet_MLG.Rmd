@@ -1,0 +1,662 @@
+---
+title: "Projet Modèles Linéaires et ses Généralisations"
+author: "Ismaël Bendib – Paul Caillere – Adrien Passuello – Axel Sauvaget"
+output:
+  pdf_document: default
+  html_document: default
+date: "2022 - 2023"
+---
+
+\tableofcontents
+
+\newpage
+
+\textbf{Importation des packages}
+
+```{r, message = FALSE}
+library(MASS);library(knitr);library(ggplot2);library(cowplot);library(reshape2)
+library(dplyr);library(GGally);library(corrplot);library(questionr);library(multcomp)
+library(TeachingDemos);library(leaps);library(dplyr);library(ROCR);library(DAAG)
+library(car)
+```
+
+
+# Partie I -  Analyse empirique descriptive des données
+
+##### Importation des données
+```{r}
+train <- read.csv(file="Diabetes_train.csv", header=TRUE)
+test <- read.csv(file="Diabetes_test.csv", header=TRUE)
+str(train)
+```
+
+On cherche à expliquer le facteur \texttt{class}. Pour pouvoir l'utiliser dans un modèle linéaire généralisé (\texttt{glm}), 
+il faut d'abord convertir les valeurs du facteur \texttt{class} en 0 (\texttt{Negative}) et 1 (\texttt{Positive}). 
+
+Mais avant cela, faisons un boxplot entre \texttt{class} et \texttt{Age} pour voir s'il y a un potentiel lien entre l'âge des patients et le diagnotic. 
+
+```{r}
+ggplot(train, aes(x=class,y=Age)) + geom_boxplot()
+```
+
+D'après ces deux boxplots, il ne semble pas y avoir de lien entre l'âge des individus et leur diagnostic.
+
+
+Convertissons désormais les valeurs des tableaux de données \texttt{train} et \texttt{test} : 
+```{r}
+train$class<-train$class=='Positive'
+test$class<-test$class=='Positive'
+train$class<-as.numeric(train$class)
+test$class<-as.numeric(test$class)
+```
+
+Maintenant dans les deux DataFrames, pour la variable réponse \texttt{class}, 1 correspond à \texttt{Positive} et 0 à \texttt{Negative}.
+
+
+De la même façon, on convertit le facteur \texttt{Gender} : 0 pour les femmes, 1 pour les hommes.
+```{r}
+train$Gender<-train$Gender=='Male'
+test$Gender<-test$Gender=='Male'
+train$Gender<-as.numeric(train$Gender)
+test$Gender<-as.numeric(test$Gender)
+```
+
+
+Enfin, on transforme toutes les autres variables '\texttt{Yes}' ou '\texttt{No}' par des \texttt{1} ou \texttt{0} pour pouvoir faire une analyse empirique.
+
+```{r}
+for(i in 1:ncol(train)){
+  train[,i][train[,i] == "Yes"] <- 1
+  train[, i][train[, i] == "No"] <- 0
+  train[,i] <- as.numeric(train[, i])
+  test[,i][test[,i] == "Yes"] <- 1
+  test[, i][test[, i] == "No"] <- 0
+  test[,i] <- as.numeric(test[, i])
+}
+```
+
+
+Voici le résumé des variables du nouveau tableau de données \texttt{train} :
+```{r}
+str(train)
+```
+
+
+#### Analyse des corrélations :
+
+
+
+On va analyser la corrélation entre les variables :
+
+```{r}
+corrplot(round(cor(train),2),method="ellipse")
+```
+
+D'après cette matrice de corrélation entre les variables, les facteurs \texttt{Polyuria} et \texttt{Polydipsia} semblent fortement corrélés entre-eux et avec \texttt{class}. 
+De même, le genre (\texttt{Gender}) semble aussi négativement corrélé avec la variable réponse \texttt{class}.
+
+
+# Partie II - Sélection et validation du modèle, étude d’outliers, interprétation de l’effet des covariables sur la variable d’intérêt
+
+Puisque la variable réponse \texttt{class} ne prend que 2 valeurs possibles (0 et 1), notre modèle sera une régression logistique. 
+
+Créons un premier modèle (complet) qui prend en compte toutes les variables pour expliquer \texttt{class} :
+```{r}
+mod_complet <- glm(class~., data=train, family='binomial')
+coef(mod_complet)
+```
+Ce modèle de régression logistique est de la forme : 
+
+$$\log\left(\dfrac{\widehat{p}}{1-\widehat{p}}\right) = 3.99461050 -0.07875796\times\texttt{Age}-4.84121687\times\textbf{1}_{\texttt{Gender = Male}} + \dots - 0.23132834\times \textbf{1}_{\texttt{Obesity = Yes}}  $$
+
+```{r}
+summary(mod_complet)
+```
+
+D'après le \texttt{summary}, seules les variables \texttt{Age, Gender, Polyuria, Polydipsia, 
+Genital.thrush, Itching} et \texttt{Irritability} sont significatives. C'est un résultat
+à prendre avec des pincettes, car le test effectué implementé pour chaque variable $j$
+ est un test de Wald défini par :
+
+\begin{center}
+    $\mathcal{H}_0$: $\beta_j = 0$ \hspace{1cm}$VS$ \hspace{1cm}$\mathcal{H}_1$: $\beta_j \neq 0$
+\end{center}
+
+Donc sous $\mathcal{H}_0$, on a $Z_j = \dfrac{\widehat{\beta}_j}{\widehat{\sigma}_j} \sim \mathcal{N}(0,1)$
+
+Il suffit donc simplement de comparer $Z_j$ au quantile d'ordre 0,95 de la loi normale centrée réduite. Si $|Z_j|>q_{0,95}^{\mathcal{N}(0,1)}$, alors on est dans la zone de rejet de  $\mathcal{H}_0$.
+
+
+Cependant peut-être que les variables que l'on n'a pas retenues sont significatives lorsqu'elles sont associées à un découpage différent. De plus, lorsqu'on traite des variables qualitatives, il est préférable de tester si une variable est significative ou non plutôt que de réaliser une approche coefficient par coefficient. 
+
+On va maintenant enlever des variables par différentes méthodes.
+Pour cela, on va effectuer plusieurs test (\texttt{anova, Anova, Backward, Forward, Both}
+avec les critères \texttt{AIC} par exemple). Si l'on constate que des variables ne sont  
+retenues dans aucun des cas, alors on les enlèvera de notre modèle.
+
+
+
+#### Méthode 1 - Forward 
+
+On part du modèle réduit à l’intercept (\texttt{mod0}). On compare \texttt{mod0} à tous les modèles contenant en plus 1 variable explicative. On choisit le meilleur modèle selon le critère. Puis, on ajoute 1 variable parmi les $p - 1$ restantes ($p = 16$) et on choisit le meilleur modèle selon le critère et on réitère ce procédé. On s’arrête quand ajouter une variable n’améliore pas le critère.
+
+```{r}
+mod0<-glm(class~1, data=train, family='binomial')
+modForw=step(mod0,class ~ Age + Gender + Polyuria + Polydipsia + sudden.weight.loss + 
+    weakness + Polyphagia + Genital.thrush + visual.blurring + 
+    Itching + Irritability + delayed.healing + partial.paresis + 
+    muscle.stiffness + Alopecia + Obesity,
+    trace=F,direction = c('forward'))
+modForw
+```
+
+Ici, le modèle retenu est : 
+\texttt{class \~ Polyuria + Gender + Polydipsia + Irritability + 
+    Itching + Genital.thrush + Age + visual.blurring + weakness + 
+    partial.paresis}
+    
+  
+#### Méthode 2 - Backward 
+
+Même stratégie mais en partant du modèle complet et on enlève 1 à 1 les variables en comparant les modèles 2 à 2 selon un critère.
+```{r}
+modBack=step(mod_complet,class~.,trace=F,direction = c('backward'))
+modBack
+```
+
+Ici, le modèle retenu est le suivant :
+\texttt{class \~ Age + Gender + Polyuria + Polydipsia + 
+    weakness + Genital.thrush + visual.blurring + Itching + Irritability + 
+    partial.paresis}
+
+#### Méthode 3 - Both
+
+Mixte des 2 méthodes. On part de l’intercept et on ajoute/enlève les variables 1 à 1 et on compare selon le critère.
+
+```{r}
+modBoth=step(mod0,class ~ Age + Gender + Polyuria + Polydipsia + sudden.weight.loss + 
+    weakness + Polyphagia + Genital.thrush + visual.blurring + 
+    Itching + Irritability + delayed.healing + partial.paresis + 
+    muscle.stiffness + Alopecia + Obesity,
+             trace=F,direction = c('both'))
+modBoth
+```
+
+Ici, le modèle retenu est :
+\texttt{class \~ Polyuria + Gender + Polydipsia + Irritability + 
+    Itching + Genital.thrush + Age + visual.blurring + weakness + 
+    partial.paresis}
+    
+
+Étant donné que les trois méthodes nous amènent à sélectionner le même modèle et que les \texttt{AIC} sont les mêmes, on va sélectionner ce modèle et on va lui ajouter des interactions qui semblent être pertinentes comme entre \texttt{Polyuria} (importante quantité d'urine par jour) et \texttt{Polydipsia} (sensation de soif intense et permanente), l'\texttt{Age} et \texttt{visual.blurring} (vision floue) et surtout \texttt{weakness} (faiblesses) avec toutes les variables liées à des maladies en général.
+
+```{r}
+mod<-glm(class ~ Gender + Irritability + Age*visual.blurring + (Polyuria * Polydipsia  + 
+    Itching + Genital.thrush + visual.blurring +
+    partial.paresis) * weakness, data=train, family='binomial')
+summary(mod)
+```
+
+On voit avec le \texttt{summary} qu'un bon nombre d'interactions qui semblaient être 
+pertinentes, ne le sont finalement pas. 
+Seules les interactions \texttt{Genital.thrush:weakness}, \texttt{Age:visual.blurring} et \texttt{visual.blurring:weakness} semblent être significatives.
+L'\texttt{Age} ne semble pas être une variable significative (ce qui est logique d'après le boxplot de la partie I) mais son interaction avec \texttt{visual.blurring} l'est. On garde donc uniquement l'intéraction dans notre modèle.
+On peut également noter que la variable \texttt{partial.paresis} n'est pas significative. 
+
+
+```{r}
+mod1=glm(class ~ Gender + Irritability + Age:visual.blurring + Polyuria + Polydipsia  + 
+    Itching + (Genital.thrush + visual.blurring) * weakness, data=train, family='binomial')
+summary(mod1)
+```
+
+On a drastiquement réduit la déviance du modèle
+Residual deviance mod_complet = 129.10
+Residual deviance modf = 112.33
+
+
+
+```{r}
+anova(mod1, test = "LRT")
+```
+
+```{r}
+library(car)
+Anova(mod1, type = "III", test.statistic = "LR")
+```
+
+Enfin en réalisant un test anova de type I, on trouve que les variables \texttt{visual.blurring} et \texttt{weakness} ne sont pas significatives.
+Mais dans le test Anova de type III, celles-ci sont bien significatives, on va donc les conserver dans le modèle.
+
+Voici donc le modèle final : 
+
+```{r}
+modf=glm(class ~ Gender + Irritability + Polyuria + Polydipsia  + 
+    Itching + (Genital.thrush + visual.blurring) * weakness + Age:visual.blurring, data=train, family='binomial')
+summary(modf)
+```
+
+
+# Partie III - Prédiction de la variable d’intérêt et évaluation du modèle sur les données
+
+### Erreur quadratique moyenne (MSE) :
+
+
+#### Échantillon train : 
+
+
+Dans un premier temps on va prédire avec le modèle final :
+```{r}
+p_train <- predict(modf,  type='response')
+```
+
+Et ensuite avec le modèle complet qu'on a sélectionné pour pouvoir comparer les deux :
+```{r}
+p_train_complet <- predict(mod_complet, type='response')
+```
+
+Comme mesure on peut utiliser la MSE (erreur quadratique moyenne), c'est l'erreur moyenne entre la prédiction et la réalité :
+
+```{r}
+MSE <- c(sqrt(sum((train$class-p_train)**2)/length(train)),
+         sqrt(sum((train$class-p_train_complet)**2)/length(train)))
+names(MSE)=c("modf","mod_complet")
+kable(data.frame(MSE))
+```
+
+La MSE issue du modèle complet est plus grande que celle du modèle final.
+
+
+#### Échantillon test : 
+
+
+Dans un premier temps on va prédire avec le modèle final :
+```{r}
+p_test <- predict(modf, newdata=test,  type='response')
+```
+
+Et ensuite avec le modèle complet qu'on a sélectionné pour pouvoir comparer les deux :
+```{r}
+p_test_complet <- predict(mod_complet, newdata=test, type='response')
+```
+
+Comme mesure on peut utiliser la MSE (erreur quadratique moyenne), c'est l'erreur moyenne entre la prédiction et la réalité :
+
+```{r}
+MSE <- c(sqrt(sum((test$class-p_test)**2)/length(test)),
+         sqrt(sum((test$class-p_test_complet)**2)/length(test)))
+names(MSE)=c("modf","mod_complet")
+kable(data.frame(MSE))
+```
+
+La MSE issue du modèle final est plus grande que celle du modèle complet.
+
+
+### Prédiction et tables de confusion :
+
+#### Échantillon train : 
+
+
+On peut regarder aussi le nombre de prédictions erronées. 
+Regardons quand la probabilité de se tromper est de 0,5 :
+```{r}
+prediction_train <- as.factor(p_train>0.5)
+prediction_train <- ifelse(p_train>0.5, 1, 0)
+```
+
+Calculons la matrice de confusion associée aux prédictions de la régression logistique (pour un palier de classification fixé à 0,5) :
+```{r}
+tabconfusion0_5_train <- table(train$class, prediction_train)
+tabconfusion0_5_train
+```
+On voit que l'on a 27 erreurs de prédiction au total.
+
+```{r}
+error <- mean(prediction_train!=(as.numeric(train$class)-1))
+print(paste("Le taux d'erreurs de prédiction est d'environ :", 1-error))
+print(paste("Le taux de vrais positifs est ", tabconfusion0_5_train[2,2]/
+              (tabconfusion0_5_train[2,1]+tabconfusion0_5_train[2,2])))
+print(paste("Le taux de faux positifs est ",tabconfusion0_5_train[1,2]/
+              (tabconfusion0_5_train[1,1]+tabconfusion0_5_train[1,2])))
+print(paste("Le taux de vrais négatifs est ", tabconfusion0_5_train[1,1]/
+              (tabconfusion0_5_train[1,1]+tabconfusion0_5_train[1,2])))
+print(paste("Le taux de faux négatifs est ",tabconfusion0_5_train[2,1]/
+              (tabconfusion0_5_train[2,2]+tabconfusion0_5_train[2,1])))
+```
+
+Le palier de classification 0,5 de la régression logistique doit être modifié pour améliorer nos résultats. Les coefficients estimés restent inchangés, tout comme les probabilités estimées d'être atteint du diabète. Réduisons donc palier de classification à 0,1 et  calculons la matrice de confusion et l'erreur.
+
+```{r}
+prediction_label_train <- as.numeric(p_train>0.1)
+tabconfusion0_9_train <- table(train$class, prediction_label_train)
+tabconfusion0_9_train
+```
+
+On voit que l'on a augmenté le nombre d'erreurs de prédiction à 54 au total, mais on a réduit le nombre de faux négatifs en passant de 13 à 2.
+
+```{r}
+error <- mean(prediction_label_train!=(as.numeric(train$class)-1))
+print(paste("Le taux d'erreurs de prédiction est d'environ :", 1-error))
+print(paste("Le taux de vrais positifs est ", tabconfusion0_9_train[2,2]/
+              (tabconfusion0_9_train[2,1]+tabconfusion0_9_train[2,2])))
+print(paste("Le taux de faux positifs est ",tabconfusion0_9_train[1,2]/
+              (tabconfusion0_9_train[1,1]+tabconfusion0_9_train[1,2])))
+print(paste("Le taux de vrais négatifs est ", tabconfusion0_9_train[1,1]/
+              (tabconfusion0_9_train[1,1]+tabconfusion0_9_train[1,2])))
+print(paste("Le taux de faux négatifs est ",tabconfusion0_9_train[2,1]/
+              (tabconfusion0_9_train[2,2]+tabconfusion0_9_train[2,1])))
+```
+
+
+Etant donné que dans le cas du diagnostique du diabète, une erreur de type faux négatif est bien plus grave qu'une erreur de type faux positif, on privilégier la sensibilité et diminuer le seuil de classification "positif au diabète" de 0,5 à 0,1. 
+
+Notre modèle de prédiction a une bonne performance en ce qui concerne la détection du diabète. Il y a seulement 2 cas sur 104 pour lesquels il ne parvient pas à détecter la maladie, tandis qu'il prévoit 13 cas de diabète chez des personnes en réalité en bonne santé. Cependant, en supposant que le traitement du diabète n'aura pas trop d'effets négatifs sur les personnes qui ne sont pas atteintes de cette maladie, on peut être satisfait de notre modèle.
+
+
+Cependant, on peut remarquer qu'avec le modèle complet on a : 
+```{r}
+prediction_complet_train <- as.numeric(p_train_complet>0.1)
+tabconfusion_complet_0_9_train <- table(train$class, prediction_complet_train)
+tabconfusion_complet_0_9_train
+```
+
+```{r}
+error <- mean(prediction_complet_train!=(as.numeric(train$class)-1))
+print(paste("Le taux d'erreurs de prédiction est d'environ :", 1-error))
+print(paste("Le taux de vrais positifs est ", tabconfusion_complet_0_9_train[2,2]/
+              (tabconfusion_complet_0_9_train[2,1]+tabconfusion_complet_0_9_train[2,2])))
+print(paste("Le taux de faux positifs est ",tabconfusion_complet_0_9_train[1,2]/
+              (tabconfusion_complet_0_9_train[1,1]+tabconfusion_complet_0_9_train[1,2])))
+print(paste("Le taux de vrais négatifs est ", tabconfusion_complet_0_9_train[1,1]/
+              (tabconfusion_complet_0_9_train[1,1]+tabconfusion_complet_0_9_train[1,2])))
+print(paste("Le taux de faux négatifs est ",tabconfusion_complet_0_9_train[2,1]/
+              (tabconfusion_complet_0_9_train[2,2]+tabconfusion_complet_0_9_train[2,1])))
+```
+Avec le modèle complet, il y a toujours que 4 personnes sur 416 où l'on arrive pas à prévoir
+qu'ils ont le diabète. On prévoit 13 personnes de moins ayant du diabète alors qu'ils n'en ont pas.
+
+
+#### Échantillon test : 
+
+Pour l'échantillon test, regardons quand la probabilité de se tromper est de 0,5 :
+```{r}
+prediction_test <- as.factor(p_test>0.5)
+prediction_test <- ifelse(p_test>0.5, 1, 0)
+```
+
+Calculons la matrice de confusion associée aux prédictions de la régression logistique (pour un palier de classification fixé à 0,5) :
+```{r}
+tabconfusion0_5_test <- table(test$class, prediction_test)
+tabconfusion0_5_test
+```
+On voit que l'on a 11 erreurs de prédiction au total.
+
+```{r}
+error <- mean(prediction_test!=(as.numeric(test$class)-1))
+print(paste("Le taux d'erreurs de prédiction est d'environ :", 1-error))
+print(paste("Le taux de vrais positifs est ", tabconfusion0_5_test[2,2]/
+              (tabconfusion0_5_test[2,1]+tabconfusion0_5_test[2,2])))
+print(paste("Le taux de faux positifs est ",tabconfusion0_5_test[1,2]/
+              (tabconfusion0_5_test[1,1]+tabconfusion0_5_test[1,2])))
+print(paste("Le taux de vrais négatifs est ", tabconfusion0_5_test[1,1]/
+              (tabconfusion0_5_test[1,1]+tabconfusion0_5_test[1,2])))
+print(paste("Le taux de faux négatifs est ",tabconfusion0_5_test[2,1]/
+              (tabconfusion0_5_test[2,2]+tabconfusion0_5_test[2,1])))
+```
+
+Le palier de classification 0,5 de la régression logistique doit être modifié pour améliorer nos résultats. Les coefficients estimés restent inchangés, tout comme les probabilités estimées d'être atteint du diabète. Réduisons donc palier de classification à 0,1 et  calculons la matrice de confusion et l'erreur.
+
+```{r}
+prediction_label_test <- as.numeric(p_test>0.1)
+tabconfusion0_9_test <- table(test$class, prediction_label_test)
+tabconfusion0_9_test
+```
+On voit que l'on a augmenté le nombre d'erreurs de prédiction à 15 au total, mais on a réduit le nombre de faux négatifs en passant de 6 à 2.
+
+```{r}
+error <- mean(prediction_label_test!=(as.numeric(test$class)-1))
+print(paste("Le taux d'erreurs de prédiction est d'environ :", 1-error))
+print(paste("Le taux de vrais positifs est ", tabconfusion0_9_test[2,2]/
+              (tabconfusion0_9_test[2,1]+tabconfusion0_9_test[2,2])))
+print(paste("Le taux de faux positifs est ",tabconfusion0_9_test[1,2]/
+              (tabconfusion0_9_test[1,1]+tabconfusion0_9_test[1,2])))
+print(paste("Le taux de vrais négatifs est ", tabconfusion0_9_test[1,1]/
+              (tabconfusion0_9_test[1,1]+tabconfusion0_9_test[1,2])))
+print(paste("Le taux de faux négatifs est ",tabconfusion0_9_test[2,1]/
+              (tabconfusion0_9_test[2,2]+tabconfusion0_9_test[2,1])))
+```
+
+
+Etant donné que dans le cas du diagnostique du diabète, une erreur de type faux négatif est bien plus grave qu'une erreur de type faux positif, on privilégier la sensibilité et diminuer le seuil de classification "positif au diabète" de 0,5 à 0,1. 
+
+Notre modèle de prédiction a une bonne performance en ce qui concerne la détection du diabète. Il y a seulement 2 cas sur 104 pour lesquels il ne parvient pas à détecter la maladie, tandis qu'il prévoit 13 cas de diabète chez des personnes en réalité en bonne santé. Cependant, en supposant que le traitement du diabète n'aura pas trop d'effets négatifs sur les personnes qui ne sont pas atteintes de cette maladie, on peut être satisfait de notre modèle.
+
+
+Cependant, on peut remarquer qu'avec le modèle complet on a : 
+```{r}
+prediction_complet_test <- as.numeric(p_test_complet>0.1)
+tabconfusion_complet_0_9_test <- table(test$class, prediction_complet_test)
+tabconfusion_complet_0_9_test
+```
+```{r}
+error <- mean(prediction_label_test!=(as.numeric(test$class)-1))
+print(paste("Le taux d'erreurs de prédiction est d'environ :", 1-error))
+print(paste("Le taux de vrais positifs est ", tabconfusion_complet_0_9_test[2,2]/
+              (tabconfusion_complet_0_9_test[2,1]+tabconfusion_complet_0_9_test[2,2])))
+print(paste("Le taux de faux positifs est ",tabconfusion_complet_0_9_test[1,2]/
+              (tabconfusion_complet_0_9_test[1,1]+tabconfusion_complet_0_9_test[1,2])))
+print(paste("Le taux de vrais négatifs est ", tabconfusion_complet_0_9_test[1,1]/
+              (tabconfusion_complet_0_9_test[1,1]+tabconfusion_complet_0_9_test[1,2])))
+print(paste("Le taux de faux négatifs est ",tabconfusion_complet_0_9_test[2,1]/
+              (tabconfusion_complet_0_9_test[2,2]+tabconfusion_complet_0_9_test[2,1])))
+```
+Avec le modèle complet, il n'y a toujours que 2 personnes sur 104 où l'on arrive pas à prévoir
+qu'ils ont le diabète. Mais on prévoit 2 personnes de moins ayant du diabète alors qu'ils n'en ont pas. Donc en terme de prédiction, le modèle complet semble être meilleur que notre modèle.  
+
+
+### ROC (Receiver Operating Characteristic) :
+
+La courbe ROC  est une courbe générée en représentant le taux de vrais positifs en fonction du taux de faux positifs pour des paliers de prédiction différents entre $0$ et $1$.
+
+#### Échantillon train
+
+
+\textbf{\underline{Pour le modèle final \texttt{modf}} : }
+
+```{r}
+library(ROCR)
+ROC_train <- performance(prediction(p_train, train$class), measure = "tpr",
+                         x.measure = "fpr")
+plot(ROC_train, colorize = FALSE, main = "Courbe ROC du modèle final (échantillon train)",
+     xlab = "Taux de faux positifs", ylab = "Taux de vrais positifs")
+
+TVP0_5_train = tabconfusion0_5_train[2,2]/(tabconfusion0_5_train[2,1] + 
+                                             tabconfusion0_5_train[2,2]) 
+TFP0_5_train = tabconfusion0_5_train[1,2]/(tabconfusion0_5_train[1,1] + 
+                                             tabconfusion0_5_train[1,2]) 
+TVP0_9_train = tabconfusion0_9_train[2,2]/(tabconfusion0_9_train[2,1] + 
+                                             tabconfusion0_9_train[2,2])
+TFP0_9_train = tabconfusion0_9_train[1,2]/(tabconfusion0_9_train[1,1] + 
+                                             tabconfusion0_9_train[1,2])
+
+points(x = c(TFP0_5_train, TFP0_9_train), y = c(TVP0_5_train, TVP0_9_train) , 
+       col=c("blue", "red"), pch=20, lwd = 3)
+legend("topright",c("p > 0.5", "p > 0.1"), col = c("blue", "red") , lwd = 3)
+```
+
+
+\textbf{\underline{Pour le modèle complet} : }
+
+```{r}
+prediction_complet_train <- as.numeric(p_train_complet>0.5)
+tabconfusion_complet_0_5_train<- table(train$class, prediction_complet_train)
+
+ROC_complet_train <- performance(prediction(p_train_complet, train$class), 
+                                 measure = "tpr", x.measure = "fpr")
+plot(ROC_complet_train, colorize = FALSE, main = "Courbe ROC du modèle complet (échantillon
+     train)", xlab = "Taux de faux positifs", ylab = "Taux de vrais positifs")
+
+
+TVP0_5_train = tabconfusion_complet_0_5_train[2,2]/
+  (tabconfusion_complet_0_5_train[2,1] + tabconfusion_complet_0_5_train[2,2]) 
+TFP0_5_train = tabconfusion_complet_0_5_train[1,2]/
+  (tabconfusion_complet_0_5_train[1,1] + tabconfusion_complet_0_5_train[1,2]) 
+TVP0_9_train = tabconfusion_complet_0_9_train[2,2]/
+  (tabconfusion_complet_0_9_train[2,1] + tabconfusion_complet_0_9_train[2,2])
+TFP0_9_train = tabconfusion_complet_0_9_train[1,2]/
+  (tabconfusion_complet_0_9_train[1,1] + tabconfusion_complet_0_9_train[1,2])
+
+
+points(x = c(TFP0_5_train, TFP0_9_train), y = c(TVP0_5_train, TVP0_9_train) ,
+       col=c("blue", "red"), pch=20, lwd = 3)
+legend("topright",c("p > 0.5", "p > 0.1"), col = c("blue", "red") , lwd = 3)
+
+```
+
+#### Échantillon test
+
+
+\textbf{\underline{Pour le modèle final \texttt{modf}} : }
+
+```{r}
+ROC_test <- performance(prediction(p_test, test$class), measure = "tpr",
+                        x.measure = "fpr")
+plot(ROC_test, colorize = FALSE, main = "Courbe ROC du modèle final (échantillon test)",
+     xlab = "Taux de faux positifs", ylab = "Taux de vrais positifs")
+
+TVP0_5_test = tabconfusion0_5_test[2,2]/(tabconfusion0_5_test[2,1] +
+                                           tabconfusion0_5_test[2,2]) 
+TFP0_5_test = tabconfusion0_5_test[1,2]/(tabconfusion0_5_test[1,1] +
+                                           tabconfusion0_5_test[1,2]) 
+TVP0_9_test = tabconfusion0_9_test[2,2]/(tabconfusion0_9_test[2,1] +
+                                           tabconfusion0_9_test[2,2])
+TFP0_9_test = tabconfusion0_9_test[1,2]/(tabconfusion0_9_test[1,1] +
+                                           tabconfusion0_9_test[1,2])
+
+points(x = c(TFP0_5_test, TFP0_9_test), y = c(TVP0_5_test, TVP0_9_test) ,
+       col=c("blue", "red"), pch=20, lwd = 3)
+legend("topright",c("p > 0.5", "p > 0.1"), col = c("blue", "red") , lwd = 3)
+```
+
+
+\textbf{\underline{Pour le modèle complet} : }
+
+```{r}
+prediction_complet_test <- as.numeric(p_test_complet>0.5)
+tabconfusion_complet_0_5_test <- table(test$class, prediction_complet_test)
+
+ROC_complet_test <- performance(prediction(p_test_complet, test$class),
+                                measure = "tpr", x.measure = "fpr")
+plot(ROC_complet_test, colorize = FALSE, main = "Courbe ROC du modèle complet (échantillon
+     test)", xlab = "Taux de faux positifs", ylab = "Taux de vrais positifs")
+
+
+TVP0_5_test = tabconfusion_complet_0_5_test[2,2]/
+  (tabconfusion_complet_0_5_test[2,1] + tabconfusion_complet_0_5_test[2,2]) 
+TFP0_5_test = tabconfusion_complet_0_5_test[1,2]/
+  (tabconfusion_complet_0_5_test[1,1] + tabconfusion_complet_0_5_test[1,2]) 
+TVP0_9_test = tabconfusion_complet_0_9_test[2,2]/
+  (tabconfusion_complet_0_9_test[2,1] + tabconfusion_complet_0_9_test[2,2])
+TFP0_9_test = tabconfusion_complet_0_9_test[1,2]/
+  (tabconfusion_complet_0_9_test[1,1] + tabconfusion_complet_0_9_test[1,2])
+
+
+points(x = c(TFP0_5_test, TFP0_9_test), y = c(TVP0_5_test, TVP0_9_test) ,
+       col=c("blue", "red"), pch=20, lwd = 3)
+legend("topright",c("p > 0.5", "p > 0.1"), col = c("blue", "red") , lwd = 3)
+```
+
+##### Nota Bene :
+voici également les mêmes courbes ROC (pour les deux échantillons) en utilisant la librarie \texttt{plotROC}.
+```{r, warning = FALSE, message=FALSE}
+library(plotROC)
+library(tidyr)
+prev_prob_test <- data.frame(complet=predict(mod_complet,newdata=test, type="response"),
+                             final=predict(modf,newdata=test,type="response"))
+df_roc_test <- prev_prob_test %>% mutate(obs_test=test$class) %>%
+gather(key=Modèle,value=score,complet,final)
+
+prev_prob_train <- data.frame(complet=predict(mod_complet, type="response"),
+                              final=predict(modf,type="response"))
+df_roc_train <- prev_prob_train %>% mutate(obs_train=train$class) %>%
+gather(key=Modèle,value=score,complet,final)
+
+plot_ROC_train <- ggplot(df_roc_train)+aes(d=obs_train,m=score,color=Modèle)+ geom_roc()+
+  theme_classic()+ggtitle("Courbes ROC (échantillon train)")+labs(y = "Taux de vrais 
+  positifs", x = "Taux de faux positifs")+theme(legend.position = "none")
+
+plot_ROC_test <- ggplot(df_roc_test)+aes(d=obs_test,m=score,color=Modèle)+ geom_roc()+
+  theme_classic()+ggtitle("Courbes ROC (échantillon test)")+labs(y = "Taux de vrais 
+  positifs", x = "Taux de faux positifs")+theme(legend.position = c(-0.5,0.5))
+
+plot_grid(plot_ROC_train,  plot_ROC_test, ncol = 2, nrow = 1)
+```
+
+### AUC (area under the curve) : 
+
+L'AUC est l'aire sous la courbe ROC. Intuitivement, un modèle avec de bonnes capacités de prédiction devrait avoir un AUC plus proche de 1 (1 étant idéal) que de 0,5. Utilisons la fonction performance pour calculer l'AUC des deux modèles.
+
+#### Échantillon train :
+
+
+\textbf{\underline{Pour le modèle final \texttt{modf}} : }
+```{r}
+auc_train <- performance(prediction(p_train,train$class), measure='auc')
+auc_train <- auc_train@y.values[[1]]
+auc_train
+```
+
+\textbf{\underline{Pour le modèle complet} : }
+
+```{r}
+auc_complet_train <- performance(prediction(p_train_complet,train$class), measure='auc')
+auc_complet_train <- auc_complet_train@y.values[[1]]
+auc_complet_train
+```
+
+Sur l'échantillon train, les AUC montre que le modèle final est meilleur que le modèle complet mais les valeurs sont très proches. 
+
+
+
+#### Échantillon test :
+
+
+\textbf{\underline{Pour le modèle final \texttt{modf} } : }
+```{r}
+auc_test <- performance(prediction(p_test,test$class), measure='auc')
+auc_test <- auc_test@y.values[[1]]
+auc_test
+```
+
+
+
+\textbf{\underline{Pour le modèle complet} : }
+
+```{r}
+auc_complet_test <- performance(prediction(p_test_complet,test$class), measure='auc')
+auc_complet_test <- auc_complet_test@y.values[[1]]
+auc_complet_test
+```
+
+Sur l'échantillon test, les AUC montre que le modèle complet est meilleur que le modèle final mais les valeurs sont très proches.
+
+
+# Conclusion : 
+
+Pour le modèle final \texttt{modf} déterminé dans la partie II et pour le modèle complet, les résultats de prédiction sont à peu près les mêmes. Puisque le modèle final \texttt{modf} a une Residual Deviance plus petite que celle du modèle complet, le modèle final \texttt{modf} semble être un modèle pratique pour réaliser les prédictions sans avoir trop de faux négatifs mais possède un taux de faux positifs un peu trop conséquent. 
+
+
+### Critiques : 
+
+- Certaines variables des tableaux de données ne sont pas significatives alors qu'elles devraient à priori jouer un rôle dans le diagnostic d'après des études cliniques (exemples : obésité, polyphagie...).
+- Il ne semble pas y avoir de différences significatives entre le modèle final et le modèle complet en terme de prédiction malgré le fait que le modèle complet présente de nombreuses variables non significatives. 
+- Pour améliorer le modèle, on pourrait ajouter des variables quantitatives aux données comme par exemple la glycémie des patients.
+- De plus, on ne sait pas de quel type de diabète il s'agit (1 ou 2). Le diabète de type 1 est une maladie immunitaire avec comme syndrome cardinal la polyurodipsie, l'amaigrissement et la polyphagie tandis que le diabète de type 2 est une maladie métabolique dans laquelle l'obésité est un facteur de risque très important.
+D'après les résultats, il semblerait donc qu'il s'agit ici d'une étude sur le diabète de type 1.
+
+
+
+
+
+
+
